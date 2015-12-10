@@ -151,7 +151,6 @@ in_filters = { }
 
 -- Output filter specifications graph.
 --      srcs: source filter pointer(s)
---      out_id: output link id
 --      from: filter begin ts
 --      to: filter end ts
 --      filter: ffmpeg-formatted filter description
@@ -159,7 +158,7 @@ in_filters = { }
 out_filters = { }
 
 -- Output filter "authoritative ranges" -- topmost filters in the graph for each part of the timeline.
---      entry: pointer to out_filter (srcs, out_id, from, to, filter)
+--      entry: pointer to out_filter (srcs, from, to, filter)
 --      from: authoritative range begin ts
 --      to: authoritative range end ts
 out_filters_authoritative = { }
@@ -189,7 +188,7 @@ setmetatable(out_filters_authoritative, {
 
 -- Initialize the first "filter": the source.
 -- (FIXME: support audio sources)
-out_filters[1] = { srcs = { }, out_id = "0:v", from = ts.make_begin(), to = ts.make_end() }
+out_filters[1] = { srcs = { }, id = "0:v", from = ts.make_begin(), to = ts.make_end() }
 out_filters_authoritative[1] = { entry = out_filters[1], from = ts.make_begin(), to = ts.make_end() }
 
 --[[
@@ -244,7 +243,7 @@ ancillary filter generators
 ]]
 
 id_counter = 1
-function out_filter_new_id()
+function generate_out_id()
 	local ret = string.format("id_%d", id_counter)
 	id_counter = id_counter + 1
 	return ret
@@ -288,7 +287,6 @@ function build_trim_for_entry_and_range(entry, from, to)
 	-- the filter entry template
 	local trim_entry = {
 		srcs = { entry },
-		out_id = out_filter_new_id(),
 		from = from,
 		to = to,
 
@@ -308,7 +306,6 @@ function build_concat_for_entries(entries)
 
 	local concat_entry = {
 		srcs = entries,
-		out_id = out_filter_new_id(),
 		from = entries[1].from,
 		to = entries[#entries].to,
 
@@ -403,7 +400,6 @@ end
 function apply_filter_for_range(filter, from, to)
 	local filter_entry = {
 		srcs = { build_input_for_range(from, to) },
-		out_id = out_filter_new_id(),
 		from = from,
 		to = to,
 		filter = filter
@@ -417,26 +413,49 @@ function apply_filter_for_range(filter, from, to)
 	})
 end
 
+function render_filter_subtree(entry)
+	assert(util.is_table(entry.srcs))
+	assert(util.is_string(entry.filter))
+
+	local entry_srcs_nr = #entry.srcs
+
+	if entry_srcs_nr < 1 then
+		return entry.filter
+	elseif entry_srcs_nr == 1 then
+		local e = entry.srcs[1]
+		if e.filter then
+			return render_filter_subtree(e) .. "," .. entry.filter
+		elseif e.id then
+			return string.format("[%s]%s", e.id, entry.filter)
+		else
+			error("A filter entry has neither a filter string nor an opaque label (for source filters)")
+		end
+	else
+		local srcs_rendered = { }
+		local srcs_labels = { }
+
+		for i, e in ipairs(entry.srcs) do
+			local e_rendered, e_label
+			if e.filter then
+				e_label = string.format("[%s]", generate_out_id())
+				table.insert(srcs_rendered, render_filter_subtree(e) .. e_label)
+			elseif e.id then
+				e_label = e.id
+			else
+				error("A filter entry has neither a filter string nor an opaque label (for source filters)")
+			end
+			table.insert(srcs_labels, e_label)
+		end
+
+		table.insert(srcs_rendered, table.concat(srcs_labels, "") .. entry.filter)
+		return table.concat(srcs_rendered, ";")
+	end
+end
+
 for _, f in ipairs(in_filters) do
 	apply_filter_for_range(f.filter, f.from, f.to)
 end
 
 result = build_input_for_range(ts.make_begin(), ts.make_end())
-result.out_id = "out:v"
 
-out_filters_rendered = { }
-
-for _, e in ipairs(out_filters) do
-	-- skip input pseudo-entry
-	if e.filter then
-		printf("filter entry: inputs: '%s' range [%s; %s) filter '%s' out_id '%s'", table.concat(util.map(e.srcs, function(e) return e.out_id end), "' '"), e.from:pretty_print(), e.to:pretty_print(), e.filter, e.out_id)
-
-		if e.out_id then
-			table.insert(out_filters_rendered, string.format("[%s]%s[%s]", table.concat(util.map(e.srcs, function(s) return s.out_id end), "]["), e.filter, e.out_id))
-		else
-			table.insert(out_filters_rendered, string.format("[%s]%s", table.concat(util.map(e.srcs, function(s) return s.out_id end), "]["), e.filter))
-		end
-	end
-end
-
-print(table.concat(out_filters_rendered, ";"))
+print(render_filter_subtree(result))
